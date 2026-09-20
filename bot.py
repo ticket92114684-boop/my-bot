@@ -20,7 +20,7 @@ CHANNEL_ID2     = -1009876543210   # apna channel ID daalo
 ADMIN_ID        = 8473160748
 PANEL_USER      = "xyz@gmail.com"
 PANEL_PASS      = "Sanju@71"
-POLL_INTERVAL   = 10
+POLL_INTERVAL   = 12
 AUTO_RELEASE_H  = 24
 
 LOGIN_URL       = "https://livestatspanel.com/index.php"
@@ -31,6 +31,8 @@ numbers_file    = "numbers.json"
 seen_messages   = set()
 bot_ref         = None
 last_alert_time = 0
+screenshot_dir  = "screenshots"
+os.makedirs(screenshot_dir, exist_ok=True)
 
 # ========== NUMBER DB ==========
 numbers_db = {}
@@ -113,12 +115,26 @@ def get_join_keyboard():
         [InlineKeyboardButton("✅ Joined - Check Again", callback_data="check_join")]
     ])
 
-# ========== BROWSER — FIXED SESSION ==========
+# ========== SCREENSHOT HELPER ==========
+async def take_screenshot(name:str):
+    """Login ke baad screenshot leke admin ko bheje"""
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"{screenshot_dir}/{name}_{ts}.png"
+        await page.screenshot(path=path, full_page=True)
+        with open(path, 'rb') as f:
+            await bot_ref.send_photo(chat_id=ADMIN_ID, photo=f, caption=f"📸 {name}")
+        os.remove(path)
+        print(f"📸 Screenshot sent: {name}", flush=True)
+    except Exception as e:
+        print(f"📸 Screenshot err: {e}", flush=True)
+
+# ========== BROWSER — MAX ANTI-DETECT ==========
 pw = browser = context = page = None
 
 async def save_auth_state():
     try: await context.storage_state(path=auth_state_file); print("💾 Session saved", flush=True)
-    except: pass
+    except Exception as e: print(f"Save err: {e}", flush=True)
 
 async def start_browser():
     global pw, browser, context, page
@@ -129,70 +145,83 @@ async def start_browser():
         if pw: await pw.stop()
     except: pass
 
+    if os.path.exists(auth_state_file):
+        try: os.remove(auth_state_file)
+        except: pass
+
     pw = await async_playwright().start()
-    ss = auth_state_file if os.path.exists(auth_state_file) else None
     browser = await pw.chromium.launch(headless=True, args=[
         '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-        '--disable-gpu','--disable-blink-features=AutomationControlled'
+        '--disable-gpu','--disable-blink-features=AutomationControlled',
+        '--start-maximized'
     ])
     context = await browser.new_context(
-        storage_state=ss,
-        viewport={'width':1280,'height':720},
-        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+        viewport={'width':1366,'height':768},
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        locale='en-US',
+        timezone_id='Asia/Kolkata'
     )
-    await context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+    # Anti-detect scripts
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+        window.chrome = {runtime: {}};
+    """)
     await context.route("**/*",lambda r: r.abort() if r.request.resource_type in ['image','stylesheet','font','media'] else r.continue_())
     page = await context.new_page()
     print("🌐 Browser ready", flush=True)
 
 async def do_login():
-    """Naya tab khol ke fresh login — kabhi loop nahi chalega"""
     global page
     try:
-        print("🔐 Logging in...", flush=True)
-        # Naya tab taaki purana state clean ho
-        await page.close()
-        page = await context.new_page()
-        
+        print("🔐 Login start...", flush=True)
         await page.goto(LOGIN_URL, timeout=30000, wait_until='domcontentloaded')
         await asyncio.sleep(2)
         
-        # Fill form
+        await take_screenshot("login_page")
+        
         inp_user = page.locator('input[type="text"], input[name*="user"], input[name*="email"]').first
-        await inp_user.click()
+        await inp_user.click(timeout=5000)
         await inp_user.fill(PANEL_USER)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
         
         inp_pass = page.locator('input[type="password"]').first
-        await inp_pass.click()
+        await inp_pass.click(timeout=5000)
         await inp_pass.fill(PANEL_PASS)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
         
-        # Submit + wait for redirect
         btn = page.locator('button:has-text("Login"), input[type="submit"], button[type="submit"]').first
         await btn.click()
         
-        # SMS page par redirect hone ka wait
-        await page.wait_for_url("**/shw_sms_tod**", timeout=15000)
-        await asyncio.sleep(2)
+        await page.wait_for_load_state('networkidle', timeout=20000)
+        await asyncio.sleep(3)
+        
+        await take_screenshot("after_login")
         
         await save_auth_state()
-        print("✅ LOGIN SUCCESS — Session Saved", flush=True)
-        return True
+        
+        if 'shw_sms_tod' in page.url or await check_login():
+            print("✅ LOGIN SUCCESS", flush=True)
+            await take_screenshot("sms_page")
+            return True
+        else:
+            print("❌ Login par redirect nahi hua", flush=True)
+            return False
     except Exception as e:
-        print(f"❌ Login failed: {e}", flush=True)
+        print(f"❌ Login error: {e}", flush=True)
+        await take_screenshot("login_error")
         return False
 
 async def check_login():
-    """Strong check — sirf text nahi, URL bhi check karega"""
     try:
         res = await page.goto(SMS_URL, timeout=20000, wait_until='domcontentloaded')
-        await asyncio.sleep(1)
-        url = page.url
+        await asyncio.sleep(1.5)
+        url = page.url.lower()
         txt = await page.content()
         
-        # Agar login page dikhe → False
-        if 'login' in url.lower() or 'Please enter your login' in txt or 'Login Here' in txt:
+        if 'login' in url or 'please enter your login' in txt.lower() or 'login here' in txt.lower():
+            print(f"🔴 Session expired — URL: {page.url}", flush=True)
+            await take_screenshot("session_expired")
             return False
         return True
     except Exception as e:
@@ -201,8 +230,8 @@ async def check_login():
 
 # ========== HELPERS ==========
 async def safe_send(cid, txt):
-    for _ in range(3):
-        try: await bot_ref.send_message(cid, txt, parse_mode="Markdown", read_timeout=15); return True
+    for _ in range(2):
+        try: await bot_ref.send_message(cid, txt, parse_mode="Markdown", read_timeout=20); return True
         except: await asyncio.sleep(1)
     return False
 def mask(p): return p.strip() if len(p)<=6 else f"{p[:4]}*****{p[-3:]}"
@@ -218,7 +247,7 @@ async def run_poller():
         await do_login()
     
     print(f"✅ ONLINE — {POLL_INTERVAL}s check", flush=True)
-    await safe_send(ADMIN_ID, f"✅ Bot chalu!\n⏱️ {POLL_INTERVAL}s\n🔢 {len(numbers_db)}")
+    await safe_send(ADMIN_ID, f"✅ Bot chalu!\n⏱️ {POLL_INTERVAL}s\n🔢 {len(numbers_db)}\n📸 Screenshot ON")
     
     err = crash = 0
     while True:
@@ -226,9 +255,9 @@ async def run_poller():
             if int(time.time())%60 < POLL_INTERVAL and auto_release_check():
                 print("🔄 Auto-release done", flush=True)
             
-            # Session check
             if not await check_login():
                 print("🔄 Session expired — Re-login...", flush=True)
+                await start_browser()
                 await do_login()
                 continue
             
@@ -401,7 +430,7 @@ async def main():
     global bot_ref
     load_numbers()
     print(f"📱 {len(numbers_db)} numbers", flush=True)
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
     bot_ref = app.bot
     
     app.add_handler(CallbackQueryHandler(check_join_cb, pattern="check_join"))
