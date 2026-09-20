@@ -14,7 +14,7 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 # ========== CONFIG — SAB SET HAI ==========
-BOT_TOKEN       = "8936294237:AAFJ-Uews5WDLTg0v2V_5Ap7z7BAjksY"
+BOT_TOKEN       = "8936294237:AAFJ-uEwsj2WdLTGgpO2V_5Abp7z7BAjksY"
 
 # ===== JOIN KE LIYE 2 CHANNELS =====
 JOIN_CH1        = -1004437601665    # ← OTP nahi bhejna, sirf join ke liye
