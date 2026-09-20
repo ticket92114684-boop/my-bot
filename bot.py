@@ -50,12 +50,12 @@ def is_valid_phone(text):
     return len(digits) >= 10
 
 def is_header_row(phone_text):
-    """Header row detect karo - agar NUMBER ya text hai phone ki jagah"""
+    """Header row detect karo"""
     header_keywords = ['NUMBER', 'Number', 'number', 'PHONE', 'Phone', 'phone']
     return any(keyword in phone_text for keyword in header_keywords)
 
 def escape_markdown(text):
-    """Markdown special characters escape karo taaki error na aaye"""
+    """Markdown special characters escape karo"""
     escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in escape_chars:
         text = text.replace(char, f'\\{char}')
@@ -166,7 +166,6 @@ async def login_panel(app):
         return False, None
 
 async def cleanup_resources_direct(pw, browser, ctx, page):
-    """Direct resources cleanup jab login fail ho"""
     try:
         if page:
             await page.close()
@@ -180,7 +179,6 @@ async def cleanup_resources_direct(pw, browser, ctx, page):
         print(f"Cleanup note: {e}", flush=True)
 
 async def cleanup_resources(page):
-    """Page se resources cleanup"""
     try:
         if page:
             ctx = page.context
@@ -193,10 +191,7 @@ async def cleanup_resources(page):
 
 # ========== SMS DETAILS EXTRACT ==========
 async def get_sms_details(page):
-    """
-    Select button click karne par jo SMS details table aata hai,
-    usse date time aur message body extract karo
-    """
+    """Select click karne par jo SMS details table aata hai usse data extract karo"""
     try:
         await asyncio.sleep(1.5)
         
@@ -208,10 +203,8 @@ async def get_sms_details(page):
             print("Details table nahi mila", flush=True)
             return None, None
         
-        # Pehla table SMS details wala hai (header: SMS details)
+        # Pehla table SMS details wala hai
         details_table = tables.first
-        
-        # Sab rows dhundho (thead + tbody dono)
         all_rows = details_table.locator('tr')
         all_row_count = await all_rows.count()
         
@@ -219,7 +212,7 @@ async def get_sms_details(page):
             print("Details table mein data nahi hai", flush=True)
             return None, None
         
-        # Second row (index 1) actual data row hai
+        # Second row data row hai
         data_row = all_rows.nth(1)
         cells = data_row.locator('td')
         cell_count = await cells.count()
@@ -228,7 +221,6 @@ async def get_sms_details(page):
             print(f"Details row mein kam cells: {cell_count}", flush=True)
             return None, None
         
-        # Details table ke columns:
         # 0 = DATE TIME, 1 = RANGE, 2 = SENDER, 3 = RECEIVER, 4 = MESSAGE BODY
         dt = clean_text(await cells.nth(0).inner_text())
         msg_body = clean_text(await cells.nth(4).inner_text())
@@ -242,6 +234,53 @@ async def get_sms_details(page):
         print(f"SMS details error: {e}", flush=True)
         return None, None
 
+# ========== CLICKABLE ELEMENT FIND ==========
+async def find_and_click_select(details_cell):
+    """
+    Details cell mein clickable element dhoondho aur click karo
+    Har tarah ke elements try karo
+    """
+    try:
+        # Pehle cell ka HTML print karo debug ke liye
+        cell_html = await details_cell.inner_html()
+        print(f"  Cell HTML: {cell_html[:200]}", flush=True)
+        
+        # Sab clickable elements try karo
+        element_selectors = [
+            'a',
+            'button',
+            'span',
+            'u',
+            'div',
+            'p',
+            '[onclick]',
+            '[href]',
+            '*'  # Last resort: koi bhi element
+        ]
+        
+        for sel in element_selectors:
+            try:
+                el = details_cell.locator(sel).first
+                if await el.count() > 0 and await el.is_visible():
+                    el_text = await el.inner_text()
+                    el_tag = await el.evaluate("e => e.tagName")
+                    print(f"  Trying {el_tag}: '{el_text.strip()}'", flush=True)
+                    await el.click(timeout=3000)
+                    print(f"  Clicked successfully!", flush=True)
+                    return True
+            except Exception as e:
+                print(f"  {sel} failed: {str(e)[:80]}", flush=True)
+                continue
+        
+        # Last resort: cell ko directly click karo
+        print(f"  Last resort: clicking cell directly", flush=True)
+        await details_cell.click(timeout=3000)
+        return True
+        
+    except Exception as e:
+        print(f"  Find/click error: {e}", flush=True)
+        return False
+
 # ========== CHECK SMS ==========
 async def check_sms(app, page):
     global seen_messages
@@ -254,7 +293,7 @@ async def check_sms(app, page):
             print("Session expired - Need re-login", flush=True)
             return False
         
-        # Sab tables dhundho
+        # "Today's SMS Statistics" wali table dhundho
         tables = page.locator('table')
         table_count = await tables.count()
         
@@ -262,10 +301,25 @@ async def check_sms(app, page):
             print("Koi table nahi mila", flush=True)
             return True
         
-        # Main list table (Today's SMS Statistics) - last table hai
-        main_table = tables.last
+        # Har table check karo ki usme "Today's SMS Statistics" hai ya nahi
+        main_table = None
+        for i in range(table_count):
+            tbl = tables.nth(i)
+            try:
+                tbl_text = await tbl.inner_text()
+                if "Today's SMS Statistics" in tbl_text:
+                    main_table = tbl
+                    print(f"Main table found at index {i}", flush=True)
+                    break
+            except Exception:
+                continue
         
-        # Sab rows dhundho (thead + tbody)
+        if not main_table:
+            # Agar nahi mila toh first table use karo
+            main_table = tables.first
+            print("Using first table as main table", flush=True)
+        
+        # Sab rows dhundho
         all_rows = main_table.locator('tr')
         total_rows = await all_rows.count()
         
@@ -282,13 +336,11 @@ async def check_sms(app, page):
                 if cell_count < 7:
                     continue
                 
-                # Main list table ke columns:
-                # 0 = NUMBER, 1 = RANGE, 2 = SENDER, 3 = STATUS, 4 = CLIENT, 5 = MESSAGES, 6 = DETAILS
+                # Columns: 0=NUMBER, 1=RANGE, 2=SENDER, 3=STATUS, 4=CLIENT, 5=MESSAGES, 6=DETAILS
                 ph = clean_text(await cells.nth(0).inner_text())
-                range_name = clean_text(await cells.nth(1).inner_text())
                 sender = clean_text(await cells.nth(2).inner_text())
-                status = clean_text(await cells.nth(3).inner_text())
                 msg_count = clean_text(await cells.nth(5).inner_text())
+                details_cell = cells.nth(6)
                 
                 # Header row skip karo
                 if is_header_row(ph):
@@ -300,39 +352,21 @@ async def check_sms(app, page):
                     print(f"Row {i}: Invalid phone ({ph}), skip", flush=True)
                     continue
                 
-                print(f"\nRow {i}: Phone={ph}, Sender={sender}, Status={status}", flush=True)
+                print(f"\nRow {i}: Phone={ph}, Sender={sender}", flush=True)
                 
-                # Unique key - phone + sender + msg_count se banayein
-                msg_key = f"v2_{ph}_{sender}_{msg_count}"
+                # Unique key
+                msg_key = f"v3_{ph}_{sender}_{msg_count}"
                 
                 if msg_key in seen_messages:
                     print(f"  Skip: Already seen", flush=True)
                     continue
                 
-                # 🔴 LAST CELL (index 6 = DETAILS column) se Select link dhoondho
-                details_cell = cells.nth(6)
+                # 🔴 Select button/link dhoondho aur click karo
+                clicked = await find_and_click_select(details_cell)
                 
-                # Sab <a> tags dhoondho is cell mein
-                links = details_cell.locator('a')
-                links_count = await links.count()
-                
-                select_link = None
-                
-                if links_count > 0:
-                    # Pehla link hi Select hai
-                    select_link = links.first
-                    link_text = await select_link.inner_text()
-                    print(f"  Link found: '{link_text.strip()}'", flush=True)
-                else:
-                    # Koi aur element try karo
-                    print(f"  Link nahi mila details cell mein", flush=True)
-                    # Ek screenshot le lo debug ke liye
-                    # await send_screenshot(page, app, f"Debug: No select link for {ph}")
+                if not clicked:
+                    print(f"  Click nahi ho paya, skip", flush=True)
                     continue
-                
-                # Select link par click karo
-                await select_link.click(timeout=3000)
-                print(f"  Select clicked", flush=True)
                 
                 # SMS details extract karo
                 dt, full_msg = await get_sms_details(page)
@@ -350,7 +384,7 @@ async def check_sms(app, page):
                 otp = extract_otp(full_msg)
                 print(f"  OTP: {otp}", flush=True)
                 
-                # Simple message format - user ke hisaab se
+                # Message format
                 message_text = f"""📱 *Number*: `{escape_markdown(mask_phone(ph))}`
 🔑 *OTP*: `{escape_markdown(otp)}`
 📝 *Message*:
@@ -410,12 +444,10 @@ async def main():
     await app.initialize()
     await app.start()
     
-    # Webhook clean karo
     print("🔒 Cleaning webhook & pending updates...", flush=True)
     await app.bot.delete_webhook(drop_pending_updates=True)
     await asyncio.sleep(2)
     
-    # Polling start karo
     await app.updater.start_polling(drop_pending_updates=True, allowed_updates=[])
     print("✅ Telegram Connected & Polling Started!", flush=True)
     
