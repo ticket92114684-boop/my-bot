@@ -12,7 +12,7 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 # ========== CONFIG — SAB SET HAI ==========
-BOT_TOKEN       = "8936294237:AAFJ-Uews5WDLTg0v2V_5Ap7z7BAjksY"
+BOT_TOKEN       = "8936294237:AAFmQLQ3WmepNb4n0sGRl4ydIZKyJb2mmqQ"
 
 JOIN_CH1        = -1004437601665
 JOIN_CH2        = -1003250473765
