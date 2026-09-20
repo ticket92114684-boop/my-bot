@@ -4,7 +4,7 @@ from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ========== CONFIG (Use Env Vars in Production) ==========
+# ========== CONFIG ==========
 BOT_TOKEN       = "8951473771:AAEZfooWkx1d-AfZP6Af5lkhuY45npPukWA"
 OTP_CHANNEL_ID  = -1003250473765
 OTP_GROUP_ID    = -1004427004477
@@ -17,7 +17,7 @@ POLL_INTERVAL   = 12
 
 seen_messages = set()
 
-# ========== UTILITY FUNCTIONS ==========
+# ========== UTILS ==========
 async def send_screenshot(page, app, caption="📸 Screenshot"):
     try:
         screenshot = await page.screenshot(type="jpeg", quality=80, full_page=True)
@@ -28,10 +28,8 @@ async def send_screenshot(page, app, caption="📸 Screenshot"):
         return False
 
 def extract_otp(text):
-    """Pehle 4-6 digit OTP, phir alphanumeric 6-12 chars"""
     m = re.search(r'\b(\d{4,6})\b', text)
-    if m:
-        return m.group(1)
+    if m: return m.group(1)
     m = re.search(r'\b([A-Za-z0-9]{6,12})\b', text)
     return m.group(1) if m else "N/A"
 
@@ -39,12 +37,14 @@ def mask_phone(text):
     digits = re.sub(r'\D', '', text)
     if len(digits) <= 8:
         return f"`{digits}`"
-    return f"`{digits[:4]}****{digits[-4:]}`"
+    return f"`{digits[:4]}**{digits[-4:]}`"
 
 def clean_text(text):
-    """Extra spaces, newlines, special chars clean karega"""
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
+
+def is_valid_phone(text):
+    digits = re.sub(r'\D', '', text)
+    return len(digits) >= 10
 
 async def send_msg(chat_id, text, app):
     try:
@@ -54,7 +54,7 @@ async def send_msg(chat_id, text, app):
         print(f"❌ Send to {chat_id}: {e}", flush=True)
         return False
 
-# ========== LOGIN PANEL ==========
+# ========== LOGIN ==========
 async def login_panel(app):
     pw = browser = ctx = page = None
     try:
@@ -75,7 +75,6 @@ async def login_panel(app):
 
         await send_screenshot(page, app, "🔐 Step 1: Login Page")
 
-        # Username fill
         email_filled = False
         for sel in ['input[name="user"]', 'input[name="email"]', 'input[type="text"]']:
             try:
@@ -94,7 +93,6 @@ async def login_panel(app):
 
         await asyncio.sleep(0.5)
 
-        # Password fill
         try:
             pass_input = page.locator('input[type="password"]')
             await pass_input.click(timeout=5000)
@@ -107,7 +105,6 @@ async def login_panel(app):
         await asyncio.sleep(0.5)
         await send_screenshot(page, app, "🔐 Step 2: Form Filled")
 
-        # Submit form
         submitted = False
         btn_selectors = [
             'button[type="submit"]', 'input[type="submit"]',
@@ -130,7 +127,6 @@ async def login_panel(app):
         await asyncio.sleep(3)
         await send_screenshot(page, app, "🔐 Step 3: After Submit")
 
-        # ✅ Fixed Login Verification
         page_content = await page.content()
         if "Please enter your login details" not in page_content:
             await send_screenshot(page, app, "✅ LOGIN SUCCESSFUL! Monitoring started 🎉")
@@ -145,7 +141,6 @@ async def login_panel(app):
         print(f"❌ Login error: {e}", flush=True)
         return False, None
 
-# ========== CLEANUP HELPER ==========
 async def cleanup_resources(page):
     try:
         if page:
@@ -160,52 +155,63 @@ async def cleanup_resources(page):
     except Exception as e:
         print(f"⚠️ Cleanup note: {e}", flush=True)
 
-# ========== 🔑 NEW: GET FULL MESSAGE BODY VIA SELECT BUTTON ==========
+# ========== FULL MESSAGE EXTRACT ==========
 async def get_full_message_body(row, page):
-    """Row ke Select button ko click karke modal se full message extract karega"""
     try:
-        # Select button dhoondho
+        row_html = await row.inner_html()
+        print(f"   🔍 Row HTML: {row_html[:200]}", flush=True)
+        
         select_btn = None
         select_selectors = [
             'a:has-text("Select")',
             'button:has-text("Select")',
+            'a:has-text("select")',
+            'button:has-text("select")',
+            'a:has-text("View")',
+            'button:has-text("View")',
+            'a:has-text("view")',
             'td:last-child a',
             'td:last-child button',
-            '.btn-select',
-            'a[href*="view_sms"]',
-            'a[onclick*="view"]'
+            'a[href*="sms"]',
+            'a[href*="view"]',
+            'a[href*="detail"]',
+            'a[onclick]',
+            'button[onclick]',
+            '.btn',
+            'a'
         ]
         
         for sel in select_selectors:
             try:
-                btn = row.locator(sel)
-                if await btn.count() > 0:
+                btn = row.locator(sel).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    btn_text = await btn.inner_text()
+                    print(f"   🔘 Button found: [{sel}] = '{btn_text.strip()}'", flush=True)
                     select_btn = btn
                     break
             except Exception:
                 continue
         
         if not select_btn:
-            print("⚠️ Select button nahi mila, table text use kar raha", flush=True)
+            print("   ❌ Select button nahi mila", flush=True)
             return None
 
-        # Modal ka wait karo before click
-        async with page.expect_popup(timeout=5000) as popup_info:
-            try:
-                await select_btn.click(timeout=3000)
+        # Try 1: Popup window
+        try:
+            async with page.expect_popup(timeout=3000) as popup_info:
+                await select_btn.click(timeout=2000)
                 popup = await popup_info.value
                 await popup.wait_for_load_state("domcontentloaded", timeout=5000)
                 await asyncio.sleep(1)
                 
-                # Popup se full message extract
-                # Common selectors for message body
                 body_selectors = [
                     'textarea',
-                    'div.message-body',
-                    'div.sms-body',
-                    'div.modal-body',
+                    'div[class*="message"]',
+                    'div[class*="body"]',
+                    'div[class*="content"]',
+                    'div[class*="sms"]',
                     'pre',
-                    'p.message',
+                    'p',
                     'body'
                 ]
                 
@@ -216,92 +222,98 @@ async def get_full_message_body(row, page):
                         if await el.count() > 0:
                             full_msg = await el.inner_text()
                             if full_msg and len(full_msg) > 10:
+                                print(f"   ✅ Popup message: {bsel}", flush=True)
                                 break
                     except Exception:
                         continue
                 
                 await popup.close()
                 return clean_text(full_msg) if full_msg else None
-                
-            except Exception:
-                # Popup nahi khula, shayad modal same page mein hai
-                pass
-        
-        # Agar same page modal hai to yahan try karo
-        await select_btn.click(timeout=3000)
-        await asyncio.sleep(1)
-        
-        # Modal selectors
-        modal_selectors = [
-            '.modal.show',
-            '.modal.in',
-            'div[role="dialog"]',
-            '#smsModal',
-            '#messageModal',
-            '.modal-dialog'
-        ]
-        
-        modal = None
-        for msel in modal_selectors:
-            try:
-                m = page.locator(msel).first
-                if await m.count() > 0 and await m.is_visible():
-                    modal = m
-                    break
-            except Exception:
-                continue
-        
-        if not modal:
-            print("⚠️ Modal nahi mila", flush=True)
-            return None
-        
-        # Modal se message extract
-        full_msg = None
-        body_selectors = [
-            'textarea',
-            '.message-body',
-            '.sms-content',
-            '.modal-body',
-            'pre',
-            'p'
-        ]
-        
-        for bsel in body_selectors:
-            try:
-                el = modal.locator(bsel).first
-                if await el.count() > 0:
-                    full_msg = await el.inner_text()
-                    if full_msg and len(full_msg) > 10:
+        except Exception:
+            pass
+
+        # Try 2: Same page modal
+        try:
+            await select_btn.click(timeout=2000)
+            await asyncio.sleep(1.5)
+            
+            modal_selectors = [
+                '.modal.show',
+                '.modal.in',
+                '.modal:visible',
+                'div[role="dialog"]',
+                '#myModal',
+                '#smsModal',
+                '#messageModal',
+                '.modal-dialog',
+                '.popup'
+            ]
+            
+            modal = None
+            for msel in modal_selectors:
+                try:
+                    m = page.locator(msel).first
+                    if await m.count() > 0 and await m.is_visible():
+                        print(f"   🪟 Modal found: {msel}", flush=True)
+                        modal = m
                         break
-            except Exception:
-                continue
+                except Exception:
+                    continue
+            
+            if modal:
+                body_selectors = [
+                    'textarea',
+                    '.message-body',
+                    '.sms-content',
+                    '.modal-body',
+                    '.modal-content',
+                    'pre',
+                    'p'
+                ]
+                
+                full_msg = None
+                for bsel in body_selectors:
+                    try:
+                        el = modal.locator(bsel).first
+                        if await el.count() > 0:
+                            full_msg = await el.inner_text()
+                            if full_msg and len(full_msg) > 10:
+                                print(f"   ✅ Modal message: {bsel}", flush=True)
+                                break
+                    except Exception:
+                        continue
+                
+                close_selectors = [
+                    '.close',
+                    'button:has-text("Close")',
+                    'button:has-text("×")',
+                    '.modal-header button',
+                    '[data-dismiss="modal"]',
+                    '[aria-label="Close"]'
+                ]
+                
+                for csel in close_selectors:
+                    try:
+                        close_btn = modal.locator(csel).first
+                        if await close_btn.count() > 0:
+                            await close_btn.click(timeout=2000)
+                            break
+                    except Exception:
+                        continue
+                
+                await asyncio.sleep(0.5)
+                return clean_text(full_msg) if full_msg else None
+        except Exception:
+            pass
         
-        # Close modal
-        close_selectors = [
-            '.close',
-            'button:has-text("Close")',
-            'button:has-text("×")',
-            '.modal-header button',
-            '[data-dismiss="modal"]'
-        ]
-        
-        for csel in close_selectors:
-            try:
-                close_btn = modal.locator(csel).first
-                if await close_btn.count() > 0:
-                    await close_btn.click(timeout=2000)
-                    break
-            except Exception:
-                continue
-        
-        await asyncio.sleep(0.5)
-        return clean_text(full_msg) if full_msg else None
+        print("   ❌ Koi method se message nahi mila", flush=True)
+        return None
         
     except Exception as e:
-        print(f"⚠️ Full message extract error: {e}", flush=True)
+        print(f"   ⚠️ Full message error: {e}", flush=True)
         return None
 
-# ========== CHECK SMS (UPDATED WITH FULL MESSAGE) ==========
+# ========== CHECK SMS ==========
 async def check_sms(app, page):
     global seen_messages
     try:
@@ -313,9 +325,9 @@ async def check_sms(app, page):
             print("🔄 Session expired — Need re-login", flush=True)
             return False
 
-        rows = page.locator('table tr')
+        rows = page.locator('tbody tr')
         total_rows = await rows.count()
-        print(f"📊 Found {total_rows} rows", flush=True)
+        print(f"📊 Found {total_rows} data rows", flush=True)
 
         for i in range(total_rows):
             try:
@@ -323,7 +335,10 @@ async def check_sms(app, page):
                 cells = row.locator('td')
                 cell_count = await cells.count()
                 
+                print(f"\n🔹 Row {i}: {cell_count} cells", flush=True)
+                
                 if cell_count < 4:
+                    print(f"   ⏭️ Skip: Kam cells", flush=True)
                     continue
 
                 dt = clean_text(await cells.nth(0).inner_text())
@@ -331,25 +346,32 @@ async def check_sms(app, page):
                 sender = clean_text(await cells.nth(2).inner_text())
                 preview_msg = clean_text(await cells.nth(3).inner_text())
 
+                print(f"   📅 Date: {dt}", flush=True)
+                print(f"   📱 Phone: {ph}", flush=True)
+                print(f"   ✉️ Sender: {sender}", flush=True)
+                print(f"   📝 Preview: {preview_msg[:80]}", flush=True)
+
+                if not is_valid_phone(ph):
+                    print(f"   ⏭️ Skip: Invalid phone", flush=True)
+                    continue
+
                 if len(preview_msg) < 6:
+                    print(f"   ⏭️ Skip: Chhota message", flush=True)
                     continue
 
                 msg_key = f"{dt}|{ph}|{preview_msg[:50]}"
                 if msg_key in seen_messages:
+                    print(f"   ⏭️ Skip: Already seen", flush=True)
                     continue
 
                 seen_messages.add(msg_key)
 
-                # 🔑 Full message body extract karo via Select button
                 full_msg = await get_full_message_body(row, page)
-                
-                # Agar full message nahi mila to preview hi use karo
                 final_msg = full_msg if full_msg else preview_msg
                 
                 otp = extract_otp(final_msg)
 
-                print(f"📩 NEW — {mask_phone(ph)} | OTP: {otp}", flush=True)
-                print(f"   Full msg: {final_msg[:100]}...", flush=True)
+                print(f"   🎯 OTP: {otp}", flush=True)
 
                 message_text = f"""🔐 *NEW OTP RECEIVED*
 📅 Time: `{dt}`
@@ -363,10 +385,9 @@ async def check_sms(app, page):
                 await send_msg(OTP_GROUP_ID, message_text, app)
 
             except Exception as row_err:
-                print(f"⚠️ Row {i} skipped: {row_err}", flush=True)
+                print(f"⚠️ Row {i} error: {row_err}", flush=True)
                 continue
 
-        # Memory cleanup
         if len(seen_messages) > 300:
             seen_messages = set(list(seen_messages)[-150:])
 
@@ -376,7 +397,7 @@ async def check_sms(app, page):
         print(f"❌ Check SMS error: {e}", flush=True)
         return False
 
-# ========== MAIN ==========
+# ========== MAIN (🔒 CONFLICT FIX ADDED) ==========
 async def main():
     print("🤖 Bot Starting...", flush=True)
     app = Application.builder().token(BOT_TOKEN).build()
@@ -395,8 +416,16 @@ async def main():
 
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    print("✅ Telegram Connected!", flush=True)
+
+    # 🔒🔒🔒 YAHAN FIX HAI 🔒🔒🔒
+    # Pehle webhook delete karo + saare pending updates drop karo
+    print("🔒 Cleaning webhook & pending updates...", flush=True)
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(2)
+
+    # Phir polling start karo
+    await app.updater.start_polling(drop_pending_updates=True, allowed_updates=[])
+    print("✅ Telegram Connected & Polling Started!", flush=True)
 
     while True:
         login_ok, page = await login_panel(app)
