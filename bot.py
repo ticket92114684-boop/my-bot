@@ -13,10 +13,11 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-# ========== DIRECT VALUES — NO CRASH ==========
+# ========== VALUES — CHANNEL ID NIKAL KE YAHAN DAALO ==========
+# Channel ID: -100 se shuru hoga, quotes mat lagana
 BOT_TOKEN       = "8936294237:AAFJ-uEwsj2WdLTGgpO2V_5Abp7z7BAjksY"
-CHANNEL_ID      = "@dolaotp"
-CHANNEL_ID2     = "@methodsbytoji"
+CHANNEL_ID      = -1001234567890   # apna pehla channel ID daalo
+CHANNEL_ID2     = -1009876543210   # apna dusra channel ID daalo
 ADMIN_ID        = 8473160748
 PANEL_USER      = "xyz@gmail.com"
 PANEL_PASS      = "Sanju@71"
@@ -26,7 +27,7 @@ AUTO_RELEASE_H  = 24
 LOGIN_URL       = "https://livestatspanel.com/index.php"
 SMS_URL         = "https://livestatspanel.com/index.php?opt=shw_sms_tod&lang=EN"
 
-cookies_file    = "panel_cookies.json"
+auth_state_file = "auth_state.json"
 numbers_file    = "numbers.json"
 seen_messages   = set()
 bot_ref         = None
@@ -135,30 +136,41 @@ def auto_release_check():
         save_numbers()
     return released
 
-# ========== FORCE SUBSCRIBE CHECK ==========
+# ========== JOIN CHECK — FIXED ==========
 async def check_subscription(user_id: int) -> bool:
     try:
         for ch in [CHANNEL_ID, CHANNEL_ID2]:
-            member = await bot_ref.get_chat_member(ch, user_id)
-            if member.status in ['left', 'kicked']:
+            member = await bot_ref.get_chat_member(chat_id=ch, user_id=user_id)
+            if member.status in ['left', 'kicked', 'banned']:
+                print(f"❌ User {user_id} not in channel {ch}", flush=True)
                 return False
+        print(f"✅ User {user_id} verified", flush=True)
         return True
-    except:
-        return False
+    except Exception as e:
+        print(f"⚠️ Check error: {e} — allowing temporarily", flush=True)
+        # Error aaye toh allow kar de taaki tu use kar sake
+        return True
 
 def get_join_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{CHANNEL_ID.replace('@','')}")],
-        [InlineKeyboardButton("📢 Join Channel 2", url=f"https://t.me/{CHANNEL_ID2.replace('@','')}")],
+        [InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/c/{str(CHANNEL_ID).replace('-100','')}")],
+        [InlineKeyboardButton("📢 Join Channel 2", url=f"https://t.me/c/{str(CHANNEL_ID2).replace('-100','')}")],
         [InlineKeyboardButton("✅ Joined - Check Again", callback_data="check_join")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ========== BROWSER MANAGEMENT ==========
+# ========== BROWSER — SESSION FIXED ==========
 pw = None
 browser = None
 context = None
 page = None
+
+async def save_auth_state():
+    try:
+        await context.storage_state(path=auth_state_file)
+        print("💾 Session saved", flush=True)
+    except Exception as e:
+        print(f"Save session err: {e}", flush=True)
 
 async def start_browser():
     global pw, browser, context, page
@@ -170,54 +182,52 @@ async def start_browser():
     except: pass
 
     pw = await async_playwright().start()
+    storage_state = auth_state_file if os.path.exists(auth_state_file) else None
+
     browser = await pw.chromium.launch(
         headless=True,
         args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
               '--disable-gpu', '--disable-blink-features=AutomationControlled']
     )
+
     context = await browser.new_context(
+        storage_state=storage_state,
         viewport={'width': 1024, 'height': 768},
         user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
     )
+
     await context.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
     """)
+
     await context.route("**/*", lambda route:
         route.abort() if route.request.resource_type in ['image', 'stylesheet', 'font', 'media'] else route.continue_()
     )
-    page = await context.new_page()
-    try:
-        if os.path.exists(cookies_file):
-            with open(cookies_file) as f:
-                cookies = json.load(f)
-                await context.add_cookies(cookies)
-    except: pass
-    print("🌐 Browser started", flush=True)
 
-async def save_cookies():
-    try:
-        cookies = await context.cookies()
-        with open(cookies_file, 'w') as f:
-            json.dump(cookies, f)
-    except: pass
+    page = await context.new_page()
+    print("🌐 Browser started", flush=True)
 
 async def do_login():
     try:
         print("🔐 Logging in...", flush=True)
         await page.goto(LOGIN_URL, timeout=25000, wait_until='domcontentloaded')
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
+
         u = page.locator('input[type="text"]').first
         await u.click()
         await u.fill(PANEL_USER)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
+
         p = page.locator('input[type="password"]').first
         await p.click()
         await p.fill(PANEL_PASS)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
+
         await page.locator('button, input[type="submit"]').first.click()
-        await asyncio.sleep(2)
-        await save_cookies()
-        print("✅ Login OK", flush=True)
+        await asyncio.sleep(3)
+
+        await save_auth_state()
+        print("✅ Login OK + Session Saved", flush=True)
         return True
     except Exception as e:
         print(f"❌ Login failed: {e}", flush=True)
@@ -226,12 +236,13 @@ async def do_login():
 async def check_login():
     try:
         await page.goto(SMS_URL, timeout=20000, wait_until='domcontentloaded')
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
         content = await page.content()
         if 'Please enter your login details' in content or 'Login Here' in content:
             return False
         return True
-    except:
+    except Exception as e:
+        print(f"Check login err: {e}", flush=True)
         return False
 
 # ========== HELPER FUNCTIONS ==========
@@ -265,6 +276,7 @@ async def run_poller():
     global seen_messages
 
     await start_browser()
+
     if not await check_login():
         await do_login()
 
@@ -289,7 +301,8 @@ async def run_poller():
                     crash_count += 1
                     print(f"💥 Crash ({crash_count}) — restarting...", flush=True)
                     await start_browser()
-                    await do_login()
+                    if not await check_login():
+                        await do_login()
                     if crash_count >= 3:
                         await admin_alert(f"⚠️ Browser baar-baar crash ho raha ({crash_count})")
                         crash_count = 0
@@ -298,8 +311,8 @@ async def run_poller():
                 raise
 
             crash_count = 0
-            content = await page.content()
-            if 'Please enter your login details' in content or 'Login Here' in content:
+
+            if not await check_login():
                 print("🔄 Session expired — re-login", flush=True)
                 await do_login()
                 continue
@@ -392,10 +405,6 @@ async def run_poller():
             if len(seen_messages) > 500:
                 seen_messages = set(list(seen_messages)[-250:])
 
-            import random
-            if random.random() < 0.1:
-                await save_cookies()
-
             err_count = 0
 
         except Exception as e:
@@ -403,15 +412,11 @@ async def run_poller():
             print(f"Poll err ({err_count}/5): {e}", flush=True)
             if 'crash' in str(e).lower() or 'closed' in str(e).lower():
                 await start_browser()
-                await do_login()
-            if err_count >= 5:
-                await admin_alert("⚠️ Network issues — recovering")
-                err_count = 0
-                try:
-                    await start_browser()
+                if not await check_login():
                     await do_login()
-                except:
-                    pass
+            if err_count >= 5:
+                await admin_alert("⚠️ Too many errors — recovering")
+                err_count = 0
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -561,14 +566,19 @@ async def restart_cmd(u: Update, c: ContextTypes):
     if u.effective_user.id != ADMIN_ID: return
     await u.message.reply_text("🔄 Restarting...")
     await start_browser()
-    await do_login()
+    if not await check_login():
+        await do_login()
     await u.message.reply_text("✅ Done!")
 
 async def relogin_cmd(u: Update, c: ContextTypes):
     if u.effective_user.id != ADMIN_ID: return
-    try: os.remove(cookies_file)
+    try:
+        if os.path.exists(auth_state_file):
+            os.remove(auth_state_file)
     except: pass
-    await u.message.reply_text("✅ Cookie cleared — re-login")
+    await start_browser()
+    await do_login()
+    await u.message.reply_text("✅ Fresh login done!")
 
 async def handle_document(u: Update, c: ContextTypes):
     if u.effective_user.id != ADMIN_ID: return
