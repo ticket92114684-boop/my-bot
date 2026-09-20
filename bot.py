@@ -49,6 +49,11 @@ def is_valid_phone(text):
     digits = re.sub(r'\D', '', text)
     return len(digits) >= 10
 
+def is_header_row(phone_text):
+    """Header row detect karo - agar NUMBER ya text hai phone ki jagah"""
+    header_keywords = ['NUMBER', 'Number', 'number', 'PHONE', 'Phone', 'phone']
+    return any(keyword in phone_text for keyword in header_keywords)
+
 def escape_markdown(text):
     """Markdown special characters escape karo taaki error na aaye"""
     escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
@@ -62,7 +67,6 @@ async def send_msg(chat_id, text, app):
         return True
     except Exception as e:
         print(f"Send to {chat_id}: {e}", flush=True)
-        # Markdown fail ho jaye toh simple text bhejo
         try:
             await app.bot.send_message(chat_id=chat_id, text=text)
             return True
@@ -184,45 +188,39 @@ async def cleanup_resources(page):
             await page.close()
             await ctx.close()
             await browser.close()
-            # Playwright ko alag se track karna padega, isliye best effort
     except Exception as e:
         print(f"Cleanup note: {e}", flush=True)
 
 # ========== SMS DETAILS EXTRACT ==========
-async def get_sms_details(page, phone, sender):
+async def get_sms_details(page):
     """
     Select button click karne par jo SMS details table aata hai,
     usse date time aur message body extract karo
     """
     try:
-        # SMS details table dhundho (jo Select click karne par upar aata hai)
-        # Pehle check karo ki details table aaya bhi hai ya nahi
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
         
-        details_tables = page.locator('table')
-        table_count = await details_tables.count()
+        # Sab tables dhundho
+        tables = page.locator('table')
+        table_count = await tables.count()
         
         if table_count < 2:
             print("Details table nahi mila", flush=True)
             return None, None
         
         # Pehla table SMS details wala hai (header: SMS details)
-        details_table = details_tables.first
-        details_rows = details_table.locator('tbody tr')
-        details_row_count = await details_rows.count()
+        details_table = tables.first
         
-        if details_row_count == 0:
-            # Header row ke baad data row check karo
-            all_rows = details_table.locator('tr')
-            all_row_count = await all_rows.count()
-            if all_row_count < 2:
-                print("Details table mein data nahi hai", flush=True)
-                return None, None
-            # Second row (index 1) data row hai
-            data_row = all_rows.nth(1)
-        else:
-            data_row = details_rows.first
+        # Sab rows dhundho (thead + tbody dono)
+        all_rows = details_table.locator('tr')
+        all_row_count = await all_rows.count()
         
+        if all_row_count < 2:
+            print("Details table mein data nahi hai", flush=True)
+            return None, None
+        
+        # Second row (index 1) actual data row hai
+        data_row = all_rows.nth(1)
         cells = data_row.locator('td')
         cell_count = await cells.count()
         
@@ -236,7 +234,7 @@ async def get_sms_details(page, phone, sender):
         msg_body = clean_text(await cells.nth(4).inner_text())
         
         print(f"Date: {dt}", flush=True)
-        print(f"Message: {msg_body[:100]}...", flush=True)
+        print(f"Message: {msg_body[:120]}...", flush=True)
         
         return dt, msg_body
         
@@ -256,8 +254,7 @@ async def check_sms(app, page):
             print("Session expired - Need re-login", flush=True)
             return False
         
-        # Main list table dhundho (Today's SMS Statistics)
-        # Ye page par dusra table hai (ya last table)
+        # Sab tables dhundho
         tables = page.locator('table')
         table_count = await tables.count()
         
@@ -265,103 +262,95 @@ async def check_sms(app, page):
             print("Koi table nahi mila", flush=True)
             return True
         
-        # Main list table usually last table hota hai
+        # Main list table (Today's SMS Statistics) - last table hai
         main_table = tables.last
-        rows = main_table.locator('tbody tr')
-        total_rows = await rows.count()
         
-        # Agar tbody mein rows nahi hain toh direct tr check karo
-        if total_rows == 0:
-            rows = main_table.locator('tr')
-            total_rows = await rows.count()
-            # Header row skip karo
-            start_idx = 1
-        else:
-            start_idx = 0
+        # Sab rows dhundho (thead + tbody)
+        all_rows = main_table.locator('tr')
+        total_rows = await all_rows.count()
         
-        print(f"Found {total_rows - start_idx} data rows", flush=True)
+        print(f"Total rows in main table: {total_rows}", flush=True)
         
-        for i in range(start_idx, total_rows):
+        new_messages_found = 0
+        
+        for i in range(total_rows):
             try:
-                row = rows.nth(i)
+                row = all_rows.nth(i)
                 cells = row.locator('td')
                 cell_count = await cells.count()
                 
-                print(f"\nRow {i}: {cell_count} cells", flush=True)
-                
                 if cell_count < 7:
-                    print(f"Skip: Kam cells ({cell_count})", flush=True)
                     continue
                 
                 # Main list table ke columns:
-                # 0 = NUMBER, 1 = RANGE, 2 = SENDER, 3 = STATUS, 4 = CLIENT, 5 = MESSAGES, 6 = DETAILS (Select)
+                # 0 = NUMBER, 1 = RANGE, 2 = SENDER, 3 = STATUS, 4 = CLIENT, 5 = MESSAGES, 6 = DETAILS
                 ph = clean_text(await cells.nth(0).inner_text())
                 range_name = clean_text(await cells.nth(1).inner_text())
                 sender = clean_text(await cells.nth(2).inner_text())
                 status = clean_text(await cells.nth(3).inner_text())
                 msg_count = clean_text(await cells.nth(5).inner_text())
                 
-                print(f"Phone: {ph}", flush=True)
-                print(f"Range: {range_name}", flush=True)
-                print(f"Sender: {sender}", flush=True)
-                print(f"Status: {status}", flush=True)
+                # Header row skip karo
+                if is_header_row(ph):
+                    print(f"Row {i}: Header row, skip", flush=True)
+                    continue
                 
+                # Invalid phone skip karo
                 if not is_valid_phone(ph):
-                    print(f"Skip: Invalid phone", flush=True)
+                    print(f"Row {i}: Invalid phone ({ph}), skip", flush=True)
                     continue
                 
-                # Unique key banayein taaki duplicate na bhejein
-                msg_key = f"{ph}|{sender}|{msg_count}"
+                print(f"\nRow {i}: Phone={ph}, Sender={sender}, Status={status}", flush=True)
+                
+                # Unique key - phone + sender + msg_count se banayein
+                msg_key = f"v2_{ph}_{sender}_{msg_count}"
+                
                 if msg_key in seen_messages:
-                    print(f"Skip: Already seen", flush=True)
+                    print(f"  Skip: Already seen", flush=True)
                     continue
                 
-                # Select button par click karo
-                select_btn = None
-                select_selectors = [
-                    'a:has-text("Select")',
-                    'a:has-text("select")',
-                    'td:last-child a',
-                    'a'
-                ]
+                # 🔴 LAST CELL (index 6 = DETAILS column) se Select link dhoondho
+                details_cell = cells.nth(6)
                 
-                for sel in select_selectors:
-                    try:
-                        btn = row.locator(sel).first
-                        if await btn.count() > 0 and await btn.is_visible():
-                            btn_text = await btn.inner_text()
-                            print(f"Button found: [{sel}] = '{btn_text.strip()}'", flush=True)
-                            select_btn = btn
-                            break
-                    except Exception:
-                        continue
+                # Sab <a> tags dhoondho is cell mein
+                links = details_cell.locator('a')
+                links_count = await links.count()
                 
-                if not select_btn:
-                    print("Select button nahi mila", flush=True)
-                    # Phir bhi seen mein add kar do taaki baar baar try na kare
-                    seen_messages.add(msg_key)
+                select_link = None
+                
+                if links_count > 0:
+                    # Pehla link hi Select hai
+                    select_link = links.first
+                    link_text = await select_link.inner_text()
+                    print(f"  Link found: '{link_text.strip()}'", flush=True)
+                else:
+                    # Koi aur element try karo
+                    print(f"  Link nahi mila details cell mein", flush=True)
+                    # Ek screenshot le lo debug ke liye
+                    # await send_screenshot(page, app, f"Debug: No select link for {ph}")
                     continue
                 
-                # Select button click karo
-                await select_btn.click(timeout=3000)
-                await asyncio.sleep(2)
+                # Select link par click karo
+                await select_link.click(timeout=3000)
+                print(f"  Select clicked", flush=True)
                 
                 # SMS details extract karo
-                dt, full_msg = await get_sms_details(page, ph, sender)
+                dt, full_msg = await get_sms_details(page)
                 
                 if not full_msg:
-                    print("Message nahi mila, skip", flush=True)
-                    seen_messages.add(msg_key)
+                    print(f"  Message nahi mila, skip", flush=True)
+                    # Seen mein nahi add karo taaki agli baar try kare
                     continue
                 
-                # Seen mein add karo
+                # Ab seen mein add karo
                 seen_messages.add(msg_key)
+                new_messages_found += 1
                 
                 # OTP extract karo
                 otp = extract_otp(full_msg)
-                print(f"OTP: {otp}", flush=True)
+                print(f"  OTP: {otp}", flush=True)
                 
-                # Message format - simple aur clean, user ke hisaab se
+                # Simple message format - user ke hisaab se
                 message_text = f"""📱 *Number*: `{escape_markdown(mask_phone(ph))}`
 🔑 *OTP*: `{escape_markdown(otp)}`
 📝 *Message*:
@@ -372,14 +361,19 @@ async def check_sms(app, page):
                 
                 await send_msg(OTP_CHANNEL_ID, message_text, app)
                 await send_msg(OTP_GROUP_ID, message_text, app)
+                print(f"  ✅ OTP sent to Telegram!", flush=True)
                 
             except Exception as row_err:
                 print(f"Row {i} error: {row_err}", flush=True)
                 continue
         
-        # Memory management - 300 se zyada ho jaye toh purane hata do
-        if len(seen_messages) > 300:
-            seen_messages = set(list(seen_messages)[-150:])
+        print(f"\n📊 This cycle: {new_messages_found} new messages found", flush=True)
+        print(f"📊 Total seen: {len(seen_messages)}", flush=True)
+        
+        # Memory management
+        if len(seen_messages) > 500:
+            seen_messages = set(list(seen_messages)[-250:])
+            print(f"🧹 Cleaned seen_messages, now: {len(seen_messages)}", flush=True)
         
         return True
         
@@ -389,47 +383,55 @@ async def check_sms(app, page):
 
 # ========== MAIN ==========
 async def main():
-    print("Bot Starting...", flush=True)
+    print("🤖 Bot Starting...", flush=True)
     
     app = Application.builder().token(BOT_TOKEN).build()
     
     async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Bot is Active! Login process in progress...")
+        await update.message.reply_text("✅ Bot is Active! Login process in progress...")
     
     async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id == ADMIN_ID:
             await update.message.reply_text(
-                f"Bot Running\nCheck every {POLL_INTERVAL}s\nProcessed: {len(seen_messages)}"
+                f"✅ Bot Running\n⏱️ Check every {POLL_INTERVAL}s\n📊 Processed: {len(seen_messages)}"
             )
+    
+    async def reset_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        global seen_messages
+        if update.effective_user.id == ADMIN_ID:
+            old_count = len(seen_messages)
+            seen_messages = set()
+            await update.message.reply_text(f"🔄 Seen cache reset! Old: {old_count}, New: 0")
     
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("reset", reset_cmd))
     
     await app.initialize()
     await app.start()
     
-    # Webhook clean karo + pending updates drop karo
-    print("Cleaning webhook & pending updates...", flush=True)
+    # Webhook clean karo
+    print("🔒 Cleaning webhook & pending updates...", flush=True)
     await app.bot.delete_webhook(drop_pending_updates=True)
     await asyncio.sleep(2)
     
     # Polling start karo
     await app.updater.start_polling(drop_pending_updates=True, allowed_updates=[])
-    print("Telegram Connected & Polling Started!", flush=True)
+    print("✅ Telegram Connected & Polling Started!", flush=True)
     
     while True:
         login_ok, page = await login_panel(app)
         if not login_ok or not page:
-            print("Retry login in 8s...", flush=True)
+            print("🔄 Retry login in 8s...", flush=True)
             await asyncio.sleep(8)
             continue
         
-        print("Monitoring Started!", flush=True)
+        print("🚀 Monitoring Started!", flush=True)
         
         while True:
             check_ok = await check_sms(app, page)
             if not check_ok:
-                print("Session lost - Re-logging in...", flush=True)
+                print("🔄 Session lost - Re-logging in...", flush=True)
                 await cleanup_resources(page)
                 break
             await asyncio.sleep(POLL_INTERVAL)
@@ -438,4 +440,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nBot Stopped by User", flush=True)
+        print("\n🛑 Bot Stopped by User", flush=True)
