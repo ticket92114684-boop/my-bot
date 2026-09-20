@@ -618,7 +618,7 @@ async def main():
     app.add_handler(CommandHandler("reloadnumbers", reloadnumbers_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
     app.add_handler(CommandHandler("relogin", relogin_cmd))
-    app.add_handler(MessageHandler(filters.Document.CSV, handle_document))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     await app.initialize()
     await app.start()
